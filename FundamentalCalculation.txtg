@@ -1,0 +1,249 @@
+/* ===========================================
+   CONFIGURATION (EDIT THESE VALUES ANYTIME)
+=========================================== */
+
+// EPS % (quarterly) must be >= this
+const MIN_QTR_EPS_GROWTH = 40;
+
+// Sales % (quarterly) must be >= this
+const MIN_QTR_SALES_GROWTH = 25;
+
+// Earnings Stability must be <= this
+const MAX_EARNINGS_STABILITY = 25;
+
+// Annual EPS Growth Rate must be >= this
+const MIN_ANNUAL_EPS_GROWTH_RATE = 25;
+
+// ROE must be >= this
+const MIN_ROE = 17;
+
+// Year configuration (LATEST FULL YEAR EPS TREND CHECK)
+const PREV_YEAR  = 2024; // Latest completed year
+const PREV2_YEAR = 2023; 
+const PREV3_YEAR = 2022;
+
+
+/* ===========================================
+   UTILITY FUNCTIONS
+=========================================== */
+
+function parseNumber(val) {
+    if (!val || ["", "n/a", "na", "-", "—"].includes(String(val).trim().toLowerCase())) {
+        return NaN;
+    }
+    let cleaned = val.replace(/₹|,|%|\+|[^\d.\-]/g, "").trim();
+    return cleaned === "" ? NaN : parseFloat(cleaned);
+}
+
+function getVisibleRows(selector) {
+    return Array.from(document.querySelectorAll(selector)).filter(row => {
+        try { return window.getComputedStyle(row).display !== "none"; }
+        catch { return true; }
+    });
+}
+
+
+/* ===========================================
+   QUARTERLY DATA
+=========================================== */
+
+const qRows = getVisibleRows("#formattedSalesAndEarningTable tbody tr")
+    .filter(r => r.querySelectorAll("td").length >= 5);
+
+const qTop3 = qRows.slice(0, 3);
+
+function getQuarterData(row) {
+    let tds = row.querySelectorAll("td");
+    return {
+        date: tds[0]?.textContent.trim() || null,
+        eps: parseNumber(tds[1]?.textContent),
+        epsPct: parseNumber(tds[2]?.textContent),
+        sales: parseNumber(tds[3]?.textContent),
+        salesPct: parseNumber(tds[4]?.textContent)
+    };
+}
+
+const quarters = qTop3.map(getQuarterData);
+
+
+/* ===========================================
+   ANNUAL EPS DATA (Dynamic)
+=========================================== */
+
+const annualRows = getVisibleRows("#fundamntlEarningTableId tbody tr")
+    .filter(r => r.querySelectorAll("td").length >= 2);
+
+function normalizeYear(str) {
+    if (!str) return null;
+
+    const y4 = str.match(/\b(20\d{2}|19\d{2})\b/);
+    if (y4) return parseInt(y4[0]);
+
+    const y2 = str.match(/\b(\d{2})\b/);
+    if (y2) return 2000 + parseInt(y2[1] || y2[0]);
+
+    return null;
+}
+
+const annualEPS = annualRows
+    .map(r => {
+        let t = r.querySelectorAll("td");
+        return {
+            year: normalizeYear(t[0]?.textContent.trim()),
+            eps: parseNumber(t[1]?.textContent)
+        };
+    })
+    .filter(r => r.year && !isNaN(r.eps))
+    .sort((a, b) => b.year - a.year);
+
+
+// Pull EPS for specific years (we configured these)
+function getEPSForYear(year) {
+    let row = annualEPS.find(r => r.year === year);
+    return row ? row.eps : NaN;
+}
+
+const epsY1 = getEPSForYear(PREV_YEAR);
+const epsY2 = getEPSForYear(PREV2_YEAR);
+const epsY3 = getEPSForYear(PREV3_YEAR);
+
+
+/* ===========================================
+   EPS, ROE, STABILITY VALUES
+=========================================== */
+
+const epsValues = Array.from(
+    document.querySelectorAll("#details_placeholder_eps .value")
+).map(e => parseNumber(e.textContent.trim()));
+
+const epsGrowthRatePct = epsValues[0];
+const earningsStability = epsValues[1];
+let roe = epsValues[4];
+
+if (isNaN(roe)) {
+    let roeElem = [...document.querySelectorAll(".details, .value")]
+        .find(e => /Return on Equity|ROE/i.test(e.textContent));
+    if (roeElem) {
+        let value = roeElem.parentElement.querySelectorAll(".value")[4];
+        roe = parseNumber(value?.textContent);
+    }
+}
+
+
+/* ===========================================
+   FUNDAMENTAL CHECKS
+=========================================== */
+
+// 1. Quarterly EPS % Check
+const check1 = quarters[0]?.epsPct >= MIN_QTR_EPS_GROWTH ? 1 : 0;
+
+// 2. EPS Increasing last 3 quarters
+const check2 = quarters.length === 3 &&
+    quarters[0].eps > quarters[1].eps &&
+    quarters[1].eps > quarters[2].eps ? 1 : 0;
+
+// 3. Quarterly Sales % Check
+const check3 = quarters[0]?.salesPct >= MIN_QTR_SALES_GROWTH ? 1 : 0;
+
+// 4. Sales Increasing last 3 quarters
+const check4 = quarters.length === 3 &&
+    quarters[0].sales > quarters[1].sales &&
+    quarters[1].sales > quarters[2].sales ? 1 : 0;
+
+// 5. Annual EPS Increasing Trend (PREV_YEAR > PREV2 > PREV3)
+const check5 =
+    epsY1 > epsY2 &&
+    epsY2 > epsY3 &&
+    !isNaN(epsY1) && !isNaN(epsY2) && !isNaN(epsY3) ? 1 : 0;
+
+// 6. Annual EPS All-Time High using PREV_YEAR
+const historicalEPS = annualEPS
+    .filter(x => x.year < PREV_YEAR)
+    .map(x => x.eps);
+
+const check6 =
+    !isNaN(epsY1) &&
+    epsY1 >= Math.max(...historicalEPS)
+        ? 1 : 0;
+
+// 7. Earnings Stability ≤ threshold
+const check7 = earningsStability <= MAX_EARNINGS_STABILITY ? 1 : 0;
+
+// 8. Quarter EPS% >= Annual EPS Growth%
+const check8 = quarters[0]?.epsPct >= epsGrowthRatePct ? 1 : 0;
+
+// 9. Annual EPS Growth >= threshold
+const check9 = epsGrowthRatePct >= MIN_ANNUAL_EPS_GROWTH_RATE ? 1 : 0;
+
+// 10. ROE >= threshold
+const check10 = roe >= MIN_ROE ? 1 : 0;
+
+
+/* ===========================================
+   ATM (After Tax Margin)
+=========================================== */
+
+let atmRow = [...document.querySelectorAll("#keyRatioTableDesk tr")]
+    .find(r => r.innerText.includes("After Tax Margin"));
+
+let check11 = 0, check12 = 0;
+
+if (atmRow) {
+    let vals = [...atmRow.querySelectorAll("td span.tdMinWidth")]
+        .map(e => parseNumber(e.textContent));
+    let [v1, v2, v3] = vals;
+
+    if (v1 > v2 && v2 > v3) check11 = 1;
+    if (v1 === Math.max(v1, v2, v3)) check12 = 1;
+}
+
+
+/* ===========================================
+   RESULT OBJECT
+=========================================== */
+
+const results = {
+    summary: {
+        score:
+            check1 + check2 + check3 + check4 + check5 +
+            check6 + check7 + check8 + check9 +
+            check10 + check11 + check12,
+        totalChecks: 12
+    },
+    checks: {
+        [`1_QtrLatest_EPS_%Chg>=${MIN_QTR_EPS_GROWTH}`]: check1,
+        "2_3Qtr_EPS_strict_increasing": check2,
+        [`3_QtrSalesGrowth>=${MIN_QTR_SALES_GROWTH}`]: check3,
+        "4_3Qtr_Sales_strict_increasing": check4,
+        [`5_Annual_EPS(${PREV_YEAR} > ${PREV2_YEAR} > ${PREV3_YEAR})`]: check5,
+        [`6_Annual_EPS_All_Time_High_${PREV_YEAR}`]: check6,
+        [`7_EarningsStability<=${MAX_EARNINGS_STABILITY}`]: check7,
+        "8_QtrEPS%>=AnnualEPS%": check8,
+        [`9_Annual_EPS_Growth>=${MIN_ANNUAL_EPS_GROWTH_RATE}`]: check9,
+        [`10_ROE>=${MIN_ROE}`]: check10,
+        "11_ATM_strict_increasing": check11,
+        "12_ATM_latest_highest": check12
+    }
+};
+
+
+/* ===========================================
+   OUTPUT TO CONSOLE
+=========================================== */
+
+console.log("====================================");
+console.log(` Fundamental Rating: ${results.summary.score} / ${results.summary.totalChecks}`);
+console.log("====================================");
+
+Object.entries(results.checks).forEach(([key, val]) =>
+    console.log(`${key}: ${val}`)
+);
+
+console.log("====================================");
+console.log("Years Used for EPS Trend:", PREV_YEAR, PREV2_YEAR, PREV3_YEAR);
+console.log("EPS Values:", {
+    [PREV_YEAR]: epsY1,
+    [PREV2_YEAR]: epsY2,
+    [PREV3_YEAR]: epsY3
+});
+console.log("====================================");
