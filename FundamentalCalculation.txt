@@ -3,24 +3,27 @@
 =========================================== */
 
 // EPS % (quarterly) must be >= this
-const MIN_QTR_EPS_GROWTH = 40;
+const MIN_QTR_EPS_GROWTH = 25;
 
 // Sales % (quarterly) must be >= this
-const MIN_QTR_SALES_GROWTH = 25;
+const MIN_QTR_SALES_GROWTH = 20;
 
 // Earnings Stability must be <= this
 const MAX_EARNINGS_STABILITY = 25;
 
 // Annual EPS Growth Rate must be >= this
-const MIN_ANNUAL_EPS_GROWTH_RATE = 25;
+const MIN_ANNUAL_EPS_GROWTH_RATE = 20;
 
 // ROE must be >= this
 const MIN_ROE = 17;
 
 // Year configuration (LATEST FULL YEAR EPS TREND CHECK)
 const PREV_YEAR  = 2024; // Latest completed year
-const PREV2_YEAR = 2023; 
+const PREV2_YEAR = 2023;
 const PREV3_YEAR = 2022;
+
+// Smoothing EPS: use latest 6 or 8 quarters (set to 6 or 8)
+const SMOOTH_QTR_COUNT = 6; // or 8
 
 
 /* ===========================================
@@ -28,18 +31,84 @@ const PREV3_YEAR = 2022;
 =========================================== */
 
 function parseNumber(val) {
-    if (!val || ["", "n/a", "na", "-", "—"].includes(String(val).trim().toLowerCase())) {
-        return NaN;
-    }
-    let cleaned = val.replace(/₹|,|%|\+|[^\d.\-]/g, "").trim();
-    return cleaned === "" ? NaN : parseFloat(cleaned);
+  if (!val || ["", "n/a", "na", "-", "—"].includes(String(val).trim().toLowerCase())) return NaN;
+  let cleaned = String(val).replace(/₹|,|%|\+|[^\d.\-]/g, "").trim();
+  return cleaned === "" ? NaN : parseFloat(cleaned);
 }
 
 function getVisibleRows(selector) {
-    return Array.from(document.querySelectorAll(selector)).filter(row => {
-        try { return window.getComputedStyle(row).display !== "none"; }
-        catch { return true; }
-    });
+  return Array.from(document.querySelectorAll(selector)).filter(row => {
+    try { return window.getComputedStyle(row).display !== "none"; }
+    catch { return true; }
+  });
+}
+
+/**
+ * Robust quarter date parser.
+ * Supports:
+ *  - "Sep-25", "Sep 25", "Sep'25", "Sep-2025", "Sep 2025"
+ *  - "Q2 2025"
+ *  - "2025"
+ * Returns timestamp (ms) for sorting.
+ */
+function parseQuarterDate(s) {
+  if (!s) return 0;
+  const str = String(s).trim();
+
+  const monthMap = {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+  };
+
+  // Match: Sep-25 / Sep 25 / Sep'25 / Sep-2025 / Sep 2025
+  const m = str.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*[-'\/ ]\s*(\d{2}|\d{4})/i);
+  if (m) {
+    const mon = monthMap[m[1].toLowerCase().slice(0, 3)];
+    let yr = parseInt(m[2], 10);
+    if (yr < 100) yr = 2000 + yr; // 25 -> 2025
+    return Date.UTC(yr, mon - 1, 1);
+  }
+
+  // Match: "Sep 2025" without separator
+  const m2 = str.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(20\d{2})/i);
+  if (m2) {
+    const mon = monthMap[m2[1].toLowerCase().slice(0, 3)];
+    const yr = parseInt(m2[2], 10);
+    return Date.UTC(yr, mon - 1, 1);
+  }
+
+  // Match: "Q2 2025"
+  const q = str.match(/Q([1-4])\s*(20\d{2})/i);
+  if (q) {
+    const qq = parseInt(q[1], 10);
+    const yr = parseInt(q[2], 10);
+    const mon = qq * 3; // Q1->3, Q2->6, Q3->9, Q4->12
+    return Date.UTC(yr, mon - 1, 1);
+  }
+
+  // Year only: 2025
+  const y = str.match(/\b(20\d{2})\b/);
+  if (y) return Date.UTC(parseInt(y[1], 10), 0, 1);
+
+  // Last fallback: Date.parse if it works
+  const d = Date.parse(str);
+  return isNaN(d) ? 0 : d;
+}
+
+// Safer labeled value extractor (used for ROE fallback)
+function getLabeledValue(labelRegex) {
+  const labels = [...document.querySelectorAll(".details, .name, td, th, div, span")];
+  const el = labels.find(e => labelRegex.test((e.textContent || "").trim()));
+  if (!el) return NaN;
+
+  const v1 = el.parentElement?.querySelector(".value");
+  if (v1) return parseNumber(v1.textContent);
+
+  const cell = el.closest("td, th");
+  const next = cell?.nextElementSibling;
+  if (next) return parseNumber(next.textContent);
+
+  return parseNumber(el.parentElement?.textContent || "");
 }
 
 
@@ -48,22 +117,30 @@ function getVisibleRows(selector) {
 =========================================== */
 
 const qRows = getVisibleRows("#formattedSalesAndEarningTable tbody tr")
-    .filter(r => r.querySelectorAll("td").length >= 5);
-
-const qTop3 = qRows.slice(0, 3);
+  .filter(r => r.querySelectorAll("td").length >= 5);
 
 function getQuarterData(row) {
-    let tds = row.querySelectorAll("td");
-    return {
-        date: tds[0]?.textContent.trim() || null,
-        eps: parseNumber(tds[1]?.textContent),
-        epsPct: parseNumber(tds[2]?.textContent),
-        sales: parseNumber(tds[3]?.textContent),
-        salesPct: parseNumber(tds[4]?.textContent)
-    };
+  let tds = row.querySelectorAll("td");
+  return {
+    date: tds[0]?.textContent.trim() || null,   // e.g. "Sep-25"
+    eps: parseNumber(tds[1]?.textContent),
+    epsPct: parseNumber(tds[2]?.textContent),
+    sales: parseNumber(tds[3]?.textContent),
+    salesPct: parseNumber(tds[4]?.textContent)
+  };
 }
 
-const quarters = qTop3.map(getQuarterData);
+// Sort quarters latest-first using robust parser
+const quartersAll = qRows
+  .map(getQuarterData)
+  .filter(q => q.date && !isNaN(q.eps) && !isNaN(q.epsPct))
+  .sort((a, b) => parseQuarterDate(b.date) - parseQuarterDate(a.date));
+
+// Latest 3 quarters for existing checks
+const quarters = quartersAll.slice(0, 3);
+
+// Latest 6 or 8 quarters for smoothing
+const smoothSource = quartersAll.slice(0, SMOOTH_QTR_COUNT);
 
 
 /* ===========================================
@@ -71,36 +148,28 @@ const quarters = qTop3.map(getQuarterData);
 =========================================== */
 
 const annualRows = getVisibleRows("#fundamntlEarningTableId tbody tr")
-    .filter(r => r.querySelectorAll("td").length >= 2);
+  .filter(r => r.querySelectorAll("td").length >= 2);
 
 function normalizeYear(str) {
-    if (!str) return null;
-
-    const y4 = str.match(/\b(20\d{2}|19\d{2})\b/);
-    if (y4) return parseInt(y4[0]);
-
-    const y2 = str.match(/\b(\d{2})\b/);
-    if (y2) return 2000 + parseInt(y2[1] || y2[0]);
-
-    return null;
+  if (!str) return null;
+  const y4 = String(str).match(/\b(20\d{2}|19\d{2})\b/);
+  if (y4) return parseInt(y4[0], 10);
+  const y2 = String(str).match(/\b(\d{2})\b/);
+  if (y2) return 2000 + parseInt(y2[1] || y2[0], 10);
+  return null;
 }
 
 const annualEPS = annualRows
-    .map(r => {
-        let t = r.querySelectorAll("td");
-        return {
-            year: normalizeYear(t[0]?.textContent.trim()),
-            eps: parseNumber(t[1]?.textContent)
-        };
-    })
-    .filter(r => r.year && !isNaN(r.eps))
-    .sort((a, b) => b.year - a.year);
+  .map(r => {
+    let t = r.querySelectorAll("td");
+    return { year: normalizeYear(t[0]?.textContent.trim()), eps: parseNumber(t[1]?.textContent) };
+  })
+  .filter(r => r.year && !isNaN(r.eps))
+  .sort((a, b) => b.year - a.year);
 
-
-// Pull EPS for specific years (we configured these)
 function getEPSForYear(year) {
-    let row = annualEPS.find(r => r.year === year);
-    return row ? row.eps : NaN;
+  let row = annualEPS.find(r => r.year === year);
+  return row ? row.eps : NaN;
 }
 
 const epsY1 = getEPSForYear(PREV_YEAR);
@@ -112,71 +181,51 @@ const epsY3 = getEPSForYear(PREV3_YEAR);
    EPS, ROE, STABILITY VALUES
 =========================================== */
 
-const epsValues = Array.from(
-    document.querySelectorAll("#details_placeholder_eps .value")
-).map(e => parseNumber(e.textContent.trim()));
+const epsValues = Array.from(document.querySelectorAll("#details_placeholder_eps .value"))
+  .map(e => parseNumber(e.textContent.trim()));
 
 const epsGrowthRatePct = epsValues[0];
 const earningsStability = epsValues[1];
-let roe = epsValues[4];
 
-if (isNaN(roe)) {
-    let roeElem = [...document.querySelectorAll(".details, .value")]
-        .find(e => /Return on Equity|ROE/i.test(e.textContent));
-    if (roeElem) {
-        let value = roeElem.parentElement.querySelectorAll(".value")[4];
-        roe = parseNumber(value?.textContent);
-    }
-}
+let roe = epsValues[4];
+if (isNaN(roe)) roe = getLabeledValue(/Return on Equity|ROE/i);
 
 
 /* ===========================================
    FUNDAMENTAL CHECKS
 =========================================== */
 
-// 1. Quarterly EPS % Check
 const check1 = quarters[0]?.epsPct >= MIN_QTR_EPS_GROWTH ? 1 : 0;
 
-// 2. EPS Increasing last 3 quarters
 const check2 = quarters.length === 3 &&
-    quarters[0].eps > quarters[1].eps &&
-    quarters[1].eps > quarters[2].eps ? 1 : 0;
+  quarters[0].eps > quarters[1].eps &&
+  quarters[1].eps > quarters[2].eps ? 1 : 0;
 
-// 3. Quarterly Sales % Check
 const check3 = quarters[0]?.salesPct >= MIN_QTR_SALES_GROWTH ? 1 : 0;
 
-// 4. Sales Increasing last 3 quarters
 const check4 = quarters.length === 3 &&
-    quarters[0].sales > quarters[1].sales &&
-    quarters[1].sales > quarters[2].sales ? 1 : 0;
+  quarters[0].sales > quarters[1].sales &&
+  quarters[1].sales > quarters[2].sales ? 1 : 0;
 
-// 5. Annual EPS Increasing Trend (PREV_YEAR > PREV2 > PREV3)
 const check5 =
-    epsY1 > epsY2 &&
-    epsY2 > epsY3 &&
-    !isNaN(epsY1) && !isNaN(epsY2) && !isNaN(epsY3) ? 1 : 0;
+  !isNaN(epsY1) && !isNaN(epsY2) && !isNaN(epsY3) &&
+  epsY1 > epsY2 && epsY2 > epsY3 ? 1 : 0;
 
-// 6. Annual EPS All-Time High using PREV_YEAR
 const historicalEPS = annualEPS
-    .filter(x => x.year < PREV_YEAR)
-    .map(x => x.eps);
+  .filter(x => x.year < PREV_YEAR && !isNaN(x.eps))
+  .map(x => x.eps);
 
-const check6 =
-    !isNaN(epsY1) &&
-    epsY1 >= Math.max(...historicalEPS)
-        ? 1 : 0;
+const maxHist = historicalEPS.length ? Math.max(...historicalEPS) : NaN;
 
-// 7. Earnings Stability ≤ threshold
-const check7 = earningsStability <= MAX_EARNINGS_STABILITY ? 1 : 0;
+const check6 = !isNaN(epsY1) && !isNaN(maxHist) && epsY1 >= maxHist ? 1 : 0;
 
-// 8. Quarter EPS% >= Annual EPS Growth%
-const check8 = quarters[0]?.epsPct >= epsGrowthRatePct ? 1 : 0;
+const check7 = !isNaN(earningsStability) && earningsStability <= MAX_EARNINGS_STABILITY ? 1 : 0;
 
-// 9. Annual EPS Growth >= threshold
-const check9 = epsGrowthRatePct >= MIN_ANNUAL_EPS_GROWTH_RATE ? 1 : 0;
+const check8 = !isNaN(epsGrowthRatePct) && (quarters[0]?.epsPct >= epsGrowthRatePct) ? 1 : 0;
 
-// 10. ROE >= threshold
-const check10 = roe >= MIN_ROE ? 1 : 0;
+const check9 = !isNaN(epsGrowthRatePct) && epsGrowthRatePct >= MIN_ANNUAL_EPS_GROWTH_RATE ? 1 : 0;
+
+const check10 = !isNaN(roe) && roe >= MIN_ROE ? 1 : 0;
 
 
 /* ===========================================
@@ -184,17 +233,58 @@ const check10 = roe >= MIN_ROE ? 1 : 0;
 =========================================== */
 
 let atmRow = [...document.querySelectorAll("#keyRatioTableDesk tr")]
-    .find(r => r.innerText.includes("After Tax Margin"));
+  .find(r => (r.innerText || "").includes("After Tax Margin"));
 
 let check11 = 0, check12 = 0;
 
 if (atmRow) {
-    let vals = [...atmRow.querySelectorAll("td span.tdMinWidth")]
-        .map(e => parseNumber(e.textContent));
-    let [v1, v2, v3] = vals;
+  let vals = [...atmRow.querySelectorAll("td span.tdMinWidth")]
+    .map(e => parseNumber(e.textContent))
+    .filter(v => !isNaN(v));
 
+  let [v1, v2, v3] = vals;
+  if (!isNaN(v1) && !isNaN(v2) && !isNaN(v3)) {
     if (v1 > v2 && v2 > v3) check11 = 1;
     if (v1 === Math.max(v1, v2, v3)) check12 = 1;
+  }
+}
+
+
+/* ===========================================
+   13) SMOOTHED EPS (2-Quarter Moving Average)
+   EXACTLY as you want:
+   (Sep25 + Jun25)/2 > (Jun25 + Mar25)/2 > (Mar25 + Dec24)/2 ...
+=========================================== */
+
+function smoothedPairs(qList) {
+  // qList must be latest-first. We build:
+  // (q[0]+q[1])/2, (q[1]+q[2])/2, (q[2]+q[3])/2 ...
+  const items = [];
+  for (let i = 0; i < qList.length - 1; i++) {
+    const A = qList[i];
+    const B = qList[i + 1];
+    if (!A || !B) continue;
+    if (isNaN(A.eps) || isNaN(B.eps)) return [];
+
+    const avg = (A.eps + B.eps) / 2;
+    const label = `${A.date}-${B.date}`; // e.g. "Sep-25-Jun-25"
+
+    items.push({ avg, label, a: A.date, b: B.date, aEPS: A.eps, bEPS: B.eps });
+  }
+  return items; // latest-first
+}
+
+const smoothItems = smoothedPairs(smoothSource);
+
+// chain like: 1.73(Sep-25-Jun-25) > 2.13(Jun-25-Mar-25) > ...
+const smoothChain = smoothItems.length
+  ? smoothItems.map(x => `${(+x.avg.toFixed(2))}(${x.label})`).join(" > ")
+  : "N/A";
+
+let check13 = 0;
+if (smoothItems.length >= 4) {
+  // Must satisfy: avg0 > avg1 > avg2 > ...
+  check13 = smoothItems.every((it, i, arr) => i === 0 || arr[i - 1].avg > it.avg) ? 1 : 0;
 }
 
 
@@ -203,27 +293,28 @@ if (atmRow) {
 =========================================== */
 
 const results = {
-    summary: {
-        score:
-            check1 + check2 + check3 + check4 + check5 +
-            check6 + check7 + check8 + check9 +
-            check10 + check11 + check12,
-        totalChecks: 12
-    },
-    checks: {
-        [`1_QtrLatest_EPS_%Chg>=${MIN_QTR_EPS_GROWTH}`]: check1,
-        "2_3Qtr_EPS_strict_increasing": check2,
-        [`3_QtrSalesGrowth>=${MIN_QTR_SALES_GROWTH}`]: check3,
-        "4_3Qtr_Sales_strict_increasing": check4,
-        [`5_Annual_EPS(${PREV_YEAR} > ${PREV2_YEAR} > ${PREV3_YEAR})`]: check5,
-        [`6_Annual_EPS_All_Time_High_${PREV_YEAR}`]: check6,
-        [`7_EarningsStability<=${MAX_EARNINGS_STABILITY}`]: check7,
-        "8_QtrEPS%>=AnnualEPS%": check8,
-        [`9_Annual_EPS_Growth>=${MIN_ANNUAL_EPS_GROWTH_RATE}`]: check9,
-        [`10_ROE>=${MIN_ROE}`]: check10,
-        "11_ATM_strict_increasing": check11,
-        "12_ATM_latest_highest": check12
-    }
+  summary: {
+    score:
+      check1 + check2 + check3 + check4 + check5 +
+      check6 + check7 + check8 + check9 +
+      check10 + check11 + check12 + check13,
+    totalChecks: 13
+  },
+  checks: {
+    [`1_QtrLatest_EPS_%Chg>=${MIN_QTR_EPS_GROWTH}`]: check1,
+    "2_3Qtr_EPS_strict_increasing": check2,
+    [`3_QtrSalesGrowth>=${MIN_QTR_SALES_GROWTH}`]: check3,
+    "4_3Qtr_Sales_strict_increasing": check4,
+    [`5_Annual_EPS(${PREV_YEAR} > ${PREV2_YEAR} > ${PREV3_YEAR})`]: check5,
+    [`6_Annual_EPS_All_Time_High_${PREV_YEAR}`]: check6,
+    [`7_EarningsStability<=${MAX_EARNINGS_STABILITY}`]: check7,
+    "8_QtrEPS%>=AnnualEPS%": check8,
+    [`9_Annual_EPS_Growth>=${MIN_ANNUAL_EPS_GROWTH_RATE}`]: check9,
+    [`10_ROE>=${MIN_ROE}`]: check10,
+    "11_ATM_strict_increasing": check11,
+    "12_ATM_latest_highest": check12,
+    [`13_SmoothedEPS_(Q1+Q2)/2>(Q2+Q3)/2..._last${SMOOTH_QTR_COUNT}`]: check13
+  }
 };
 
 
@@ -235,15 +326,15 @@ console.log("====================================");
 console.log(` Fundamental Rating: ${results.summary.score} / ${results.summary.totalChecks}`);
 console.log("====================================");
 
-Object.entries(results.checks).forEach(([key, val]) =>
-    console.log(`${key}: ${val}`)
-);
+Object.entries(results.checks).forEach(([key, val]) => console.log(`${key}: ${val}`));
 
 console.log("====================================");
-console.log("Years Used for EPS Trend:", PREV_YEAR, PREV2_YEAR, PREV3_YEAR);
-console.log("EPS Values:", {
-    [PREV_YEAR]: epsY1,
-    [PREV2_YEAR]: epsY2,
-    [PREV3_YEAR]: epsY3
-});
+console.log("Smoothed EPS chain:", smoothChain);
+console.log("Smoothed EPS debug (pair, avg, epsA, epsB):");
+console.table(smoothItems.map(x => ({
+  pair: x.label,
+  avg: +x.avg.toFixed(2),
+  epsA: x.aEPS,
+  epsB: x.bEPS
+})));
 console.log("====================================");
