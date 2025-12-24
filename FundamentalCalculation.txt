@@ -69,7 +69,7 @@ function parseQuarterDate(s) {
     return Date.UTC(yr, mon - 1, 1);
   }
 
-  // Match: "Sep 2025" without separator
+  // Match: "Sep 2025"
   const m2 = str.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(20\d{2})/i);
   if (m2) {
     const mon = monthMap[m2[1].toLowerCase().slice(0, 3)];
@@ -252,13 +252,11 @@ if (atmRow) {
 
 /* ===========================================
    13) SMOOTHED EPS (2-Quarter Moving Average)
-   EXACTLY as you want:
+   EXACTLY:
    (Sep25 + Jun25)/2 > (Jun25 + Mar25)/2 > (Mar25 + Dec24)/2 ...
 =========================================== */
 
 function smoothedPairs(qList) {
-  // qList must be latest-first. We build:
-  // (q[0]+q[1])/2, (q[1]+q[2])/2, (q[2]+q[3])/2 ...
   const items = [];
   for (let i = 0; i < qList.length - 1; i++) {
     const A = qList[i];
@@ -267,23 +265,21 @@ function smoothedPairs(qList) {
     if (isNaN(A.eps) || isNaN(B.eps)) return [];
 
     const avg = (A.eps + B.eps) / 2;
-    const label = `${A.date}-${B.date}`; // e.g. "Sep-25-Jun-25"
+    const label = `${A.date}-${B.date}`; // "Sep-25-Jun-25"
 
-    items.push({ avg, label, a: A.date, b: B.date, aEPS: A.eps, bEPS: B.eps });
+    items.push({ avg, label, aEPS: A.eps, bEPS: B.eps });
   }
   return items; // latest-first
 }
 
 const smoothItems = smoothedPairs(smoothSource);
 
-// chain like: 1.73(Sep-25-Jun-25) > 2.13(Jun-25-Mar-25) > ...
 const smoothChain = smoothItems.length
   ? smoothItems.map(x => `${(+x.avg.toFixed(2))}(${x.label})`).join(" > ")
   : "N/A";
 
 let check13 = 0;
 if (smoothItems.length >= 4) {
-  // Must satisfy: avg0 > avg1 > avg2 > ...
   check13 = smoothItems.every((it, i, arr) => i === 0 || arr[i - 1].avg > it.avg) ? 1 : 0;
 }
 
@@ -319,17 +315,40 @@ const results = {
 
 
 /* ===========================================
-   OUTPUT TO CONSOLE
+   FINAL OUTPUT : ALERT + CONSOLE
 =========================================== */
 
-console.log("====================================");
-console.log(` Fundamental Rating: ${results.summary.score} / ${results.summary.totalChecks}`);
-console.log("====================================");
+const alertText =
+`Fundamental Rating : ${results.summary.score} / ${results.summary.totalChecks}
 
-Object.entries(results.checks).forEach(([key, val]) => console.log(`${key}: ${val}`));
+1) Latest Q EPS % >= ${MIN_QTR_EPS_GROWTH}: ${check1}
+2) EPS increasing (3Q): ${check2}
+3) Latest Q Sales % >= ${MIN_QTR_SALES_GROWTH}: ${check3}
+4) Sales increasing (3Q): ${check4}
+5) Annual EPS Trend (${PREV_YEAR}>${PREV2_YEAR}>${PREV3_YEAR}): ${check5}
+6) Annual EPS All Time High: ${check6}
+7) Earnings Stability <= ${MAX_EARNINGS_STABILITY}: ${check7}
+8) Qtr EPS% >= Annual EPS% : ${check8}
+9) Annual EPS Growth >= ${MIN_ANNUAL_EPS_GROWTH_RATE}: ${check9}
+10) ROE >= ${MIN_ROE}: ${check10}
+11) ATM increasing: ${check11}
+12) ATM latest highest: ${check12}
+13) Smoothed EPS Trend Pass: ${check13}
+${smoothChain}
+`;
 
+// Alert popup
+alert(alertText);
+
+// Console output
+console.clear();
+console.log("====================================");
+console.log(`FUNDAMENTAL RATING : ${results.summary.score} / ${results.summary.totalChecks}`);
+console.log("====================================");
+console.table(results.checks);
 console.log("====================================");
 console.log("Smoothed EPS chain:", smoothChain);
+console.log("====================================");
 console.log("Smoothed EPS debug (pair, avg, epsA, epsB):");
 console.table(smoothItems.map(x => ({
   pair: x.label,
